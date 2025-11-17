@@ -1,0 +1,39 @@
+﻿<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>NovaTrip AI Planner</title>
+    <style>
+        body { font-family: Arial, sans-serif; background: #f4f7fb; padding: 30px; }
+        .card { background: #fff; width: 520px; margin: auto; padding: 22px; border-radius: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.06); }
+        input, textarea { width: 100%; padding: 10px; margin-top: 8px; border-radius: 6px; border: 1px solid #ddd; }
+        button { padding: 10px 16px; margin-top: 10px; width: 100%; background:#007bff; color:#fff; border:none; border-radius:6px; cursor:pointer; }
+        pre { white-space: pre-wrap; background:#fafafa; padding:10px; border-radius:6px; border:1px solid #eee; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h2>NovaTrip AI — Simple Itinerary</h2>
+        <form method="post">
+            <label>Destination</label>
+            <input name="destination" placeholder="e.g., Goa" required>
+
+            <label>Budget</label>
+            <input name="budget" placeholder="e.g., 20000 INR">
+
+            <label>Number of Days</label>
+            <input name="days" type="number" min="1" value="3" required>
+
+            <label>Trip Type</label>
+            <input name="trip_type" placeholder="e.g., adventure, family, solo">
+
+            <button type="submit">Generate Itinerary</button>
+        </form>
+
+        {% if result %}
+            <h3>Itinerary</h3>
+            <pre>{{ result }}</pre>
+        {% endif %}
+    </div>
+</body>
+</html>
