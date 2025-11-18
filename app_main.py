@@ -1,15 +1,31 @@
-# app_main.py  — Full app (cleaned) with Groq-safe fallback, route, pinpoints, and strict structured chat modify
+# app_main.py
+# Full Flask app — sanitize, remove markdown asterisks, align itinerary bullets for neat display,
+# keep raw output in session, auto-finish truncated LLM responses, PDF download fallback.
 import os
 import re
 import json
+import math
 import requests
-from flask import Flask, render_template, request, jsonify, session, current_app
+from io import BytesIO
+from flask import (
+    Flask, render_template, request, jsonify, session,
+    current_app, send_file
+)
 
 # Optional Groq SDK
 try:
     from groq import Groq
 except Exception:
     Groq = None
+
+# Optional PDF library
+try:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas as rl_canvas
+    from reportlab.pdfbase.pdfmetrics import stringWidth
+    REPORTLAB_AVAILABLE = True
+except Exception:
+    REPORTLAB_AVAILABLE = False
 
 app = Flask(__name__, template_folder="templates_main")
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-secret-key")
@@ -21,18 +37,94 @@ if Groq and GROQ_KEY:
 else:
     client = None
 
-def generate_itinerary_via_groq(prompt_text):
+# -----------------------
+# Config
+# -----------------------
+MAX_ITINERARY_CHARS = 100000   # raised limit to avoid early truncation
+LLM_MAX_TOKENS = 4000         # larger token budget for initial generation
+LLM_FINISH_TOKENS = 2000       # tokens for finish-retry when truncated
+
+# -----------------------
+# Helpers: sanitize, strip asterisks
+# -----------------------
+def strip_asterisks(text: str) -> str:
+    if not text:
+        return text
+    return re.sub(r'\*+', '', text)
+
+def sanitize_itinerary_text(text: str, max_chars=MAX_ITINERARY_CHARS) -> str:
+    if not text:
+        return ""
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = text.replace("```", "` ` `").replace("<<ITINERARY_START>>", " ").replace("<<ITINERARY_END>>", " ")
+    text = re.sub(r"[^\x09\x0A\x0D\x20-\x7E\u00A0-\uFFFF]", " ", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n\s*\n+", "\n\n", text)
+    if len(text) > max_chars:
+        text = text[:max_chars]
+    return text
+
+def looks_truncated(text: str) -> bool:
+    if not text:
+        return True
+    t = text.strip()
+    if t.endswith("...") or "[...truncated...]" in t:
+        return True
+    last = t[-1]
+    return last not in ".!?"
+
+# -----------------------
+# Align itinerary text for neat selection/display
+# -----------------------
+def align_itinerary_text(text: str) -> str:
     """
-    Call Groq (if available) or return a mock. Returns raw text.
+    Normalize indentation and bullets for neat display.
+    - Removes leading indentation.
+    - Converts '-', '*' bullets (and repeated bullets) to a single '• '.
+    - Collapses excessive spaces.
+    - Preserves paragraph breaks.
     """
+    if not text:
+        return text
+    lines = text.splitlines()
+    out_lines = []
+    for line in lines:
+        # preserve empty lines
+        if not line.strip():
+            out_lines.append('')
+            continue
+
+        # remove leading whitespace
+        s = re.sub(r'^[ \t]+', '', line)
+
+        # replace runs of bullet characters or leading hyphen/asterisk sequences with a single bullet "• "
+        s = re.sub(r'^[\-\*\u2022\•\s]{1,6}', lambda m: '• ' if re.search(r'[\-\*\u2022\•]', m.group(0)) else '', s)
+
+        # ensure single spaces between words
+        s = re.sub(r'[ \t]{2,}', ' ', s)
+
+        # trim trailing spaces
+        s = s.rstrip()
+
+        out_lines.append(s)
+
+    # join and also collapse accidental multiple blank lines to max two
+    joined = '\n'.join(out_lines)
+    joined = re.sub(r'\n{3,}', '\n\n', joined)
+    return joined
+
+# -----------------------
+# LLM wrapper with finish-retry (same as before)
+# -----------------------
+def generate_itinerary_via_groq(prompt_text: str) -> str:
     if not client:
-        # Basic mock - useful for dev and testing
+        # Dev fallback
         return (
             "MOCK ITINERARY (no API key)\n\n"
             "Day 1: Arrival — Walk around the local market; Sunset at Baga Beach.\n"
-            "Food: Fisherman's Cafe, Beach Shack.\n\n"
+            " - Breakfast at Fisherman's Cafe, Beach Shack.\n\n"
             "Day 2: Fort Aguada, Old Goa; visit Basilica.\n"
-            "Food: Cafe Chocolat, Local Diner.\n\n"
+            " - Lunch at Cafe Chocolat, Local Diner.\n\n"
             "Tip: Carry water and sunscreen."
         )
 
@@ -43,15 +135,84 @@ def generate_itinerary_via_groq(prompt_text):
                 {"role": "system", "content": "You are a travel assistant."},
                 {"role": "user", "content": prompt_text}
             ],
-            max_tokens=1000
+            max_tokens=LLM_MAX_TOKENS
         )
-        return response.choices[0].message.content
+        raw = response.choices[0].message.content if hasattr(response.choices[0].message, 'content') else response.choices[0].text
+        raw = raw if isinstance(raw, str) else str(raw)
+        if looks_truncated(raw):
+            try:
+                followup_prompt = "The previous itinerary got cut off. Finish the final sentence or paragraph so the itinerary ends cleanly."
+                follow = client.chat.completions.create(
+                    model="llama-3.1-8b-instant",
+                    messages=[
+                        {"role":"system","content":"You are a travel assistant."},
+                        {"role":"user","content": followup_prompt},
+                        {"role":"assistant","content": raw}
+                    ],
+                    max_tokens=LLM_FINISH_TOKENS
+                )
+                extra = follow.choices[0].message.content if hasattr(follow.choices[0].message,'content') else follow.choices[0].text
+                extra = extra if isinstance(extra, str) else str(extra)
+                if extra and len(extra.strip()) > 0:
+                    raw = raw.rstrip() + "\n\n" + extra.strip()
+            except Exception:
+                current_app.logger.debug("LLM finish-retry failed; returning original raw.")
+        return raw
     except Exception as e:
+        current_app.logger.exception("Groq API error")
         return f"ERROR: calling Groq API failed: {str(e)}"
 
+# -----------------------
+# PDF generation helper (reportlab)
+# -----------------------
+def pdf_from_text_reportlab(text: str, title: str = "Itinerary") -> BytesIO:
+    buffer = BytesIO()
+    page_width, page_height = A4
+    c = rl_canvas.Canvas(buffer, pagesize=A4)
+    left_margin = 40
+    top_margin = page_height - 40
+    max_width = page_width - 2 * left_margin
+    line_height = 14
+    y = top_margin
+
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(left_margin, y, title)
+    y -= (line_height * 1.5)
+    c.setFont("Helvetica", 11)
+
+    lines = []
+    for paragraph in text.splitlines():
+        if not paragraph.strip():
+            lines.append("")
+            continue
+        words = paragraph.split()
+        current = ""
+        for w in words:
+            test = (current + " " + w).strip() if current else w
+            width = stringWidth(test, "Helvetica", 11)
+            if width <= max_width:
+                current = test
+            else:
+                if current:
+                    lines.append(current)
+                current = w
+        if current:
+            lines.append(current)
+
+    for line in lines:
+        if y < 60:
+            c.showPage()
+            c.setFont("Helvetica", 11)
+            y = top_margin
+        c.drawString(left_margin, y, line)
+        y -= line_height
+
+    c.save()
+    buffer.seek(0)
+    return buffer
 
 # -----------------------
-# Basic home / form
+# Routes
 # -----------------------
 @app.route("/", methods=["GET", "POST"])
 def home():
@@ -76,49 +237,49 @@ def home():
             "- One safety tip\n"
             "Be clear and user-friendly."
         )
-        result = generate_itinerary_via_groq(prompt)
+        raw = generate_itinerary_via_groq(prompt)
+        try:
+            session['last_raw_itinerary'] = raw
+        except Exception:
+            current_app.logger.debug("Unable to store itinerary in session.")
+        sanitized = sanitize_itinerary_text(raw)
+        cleaned = strip_asterisks(sanitized)
+        aligned = align_itinerary_text(cleaned)
+        result = aligned
 
     return render_template("index_page.html", result=result, destination=destination)
 
-
-# -----------------------
-# Geocoding & routing helpers
-# -----------------------
-def geocode_address(address):
-    """Geocode an address -> (lat, lon, display_name) using Nominatim (server-side)."""
-    url = "https://nominatim.openstreetmap.org/search"
-    params = {"q": address, "format": "json", "limit": 1}
-    headers = {"User-Agent": "novatripai/1.0 (+https://example.com)"}
-    r = requests.get(url, params=params, headers=headers, timeout=10)
-    r.raise_for_status()
-    data = r.json()
-    if not data:
+# route & download endpoints (same as previous version)
+def geocode_place_simple(place):
+    try:
+        url = "https://nominatim.openstreetmap.org/search"
+        params = {"q": place, "format": "json", "limit": 1}
+        headers = {"User-Agent": "novatripai/1.0 (+https://example.com)"}
+        r = requests.get(url, params=params, headers=headers, timeout=8)
+        r.raise_for_status()
+        data = r.json()
+        if not data:
+            return None
+        item = data[0]
+        return float(item["lat"]), float(item["lon"]), item.get("display_name", place)
+    except Exception:
         return None
-    return float(data[0]["lat"]), float(data[0]["lon"]), data[0].get("display_name", address)
-
 
 @app.route("/route")
 def get_route():
-    """
-    Query params:
-      origin=lat,lng  OR origin_address=...
-      dest=lat,lng    OR dest_address=...
-    Returns GeoJSON Feature (LineString) with properties distance (m) and duration (s)
-    """
     origin = request.args.get("origin")
     dest = request.args.get("dest")
     origin_addr = request.args.get("origin_address")
     dest_addr = request.args.get("dest_address")
 
     try:
-        # resolve addresses if given
         if origin_addr and not origin:
-            g = geocode_address(origin_addr)
+            g = geocode_place_simple(origin_addr)
             if not g:
                 return jsonify({"error": "Could not geocode origin address"}), 400
             origin = f"{g[0]},{g[1]}"
         if dest_addr and not dest:
-            g = geocode_address(dest_addr)
+            g = geocode_place_simple(dest_addr)
             if not g:
                 return jsonify({"error": "Could not geocode destination address"}), 400
             dest = f"{g[0]},{g[1]}"
@@ -135,7 +296,6 @@ def get_route():
         o_lat, o_lng = parse_latlng(origin)
         d_lat, d_lng = parse_latlng(dest)
 
-        # OSRM expects lon,lat and semi-colon separated pairs
         osrm_coords = f"{o_lng},{o_lat};{d_lng},{d_lat}"
         osrm_url = f"http://router.project-osrm.org/route/v1/driving/{osrm_coords}"
         params = {"overview": "full", "geometries": "geojson", "steps": "false"}
@@ -147,9 +307,9 @@ def get_route():
             return jsonify({"error": "No route found"}), 404
 
         route = data["routes"][0]
-        geometry = route["geometry"]  # GeoJSON LineString
-        distance = route.get("distance")  # meters
-        duration = route.get("duration")  # seconds
+        geometry = route["geometry"]
+        distance = route.get("distance")
+        duration = route.get("duration")
 
         result = {
             "type": "Feature",
@@ -157,127 +317,47 @@ def get_route():
             "geometry": geometry
         }
         return jsonify(result)
-
     except requests.exceptions.RequestException as re:
         return jsonify({"error": f"External service error: {str(re)}"}), 502
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-
-# -----------------------
-# Pinpoints endpoint: accepts either "text" or "places" list
-# -----------------------
-def extract_place_candidates(itinerary_text, max_candidates=20):
-    """
-    Lightweight heuristic to extract place-name candidates from itinerary text.
-    Finds sequences of 1-5 Titlecase words.
-    """
-    if not itinerary_text:
-        return []
-
-    text = itinerary_text.replace("—", " ").replace("–", " ").replace("/", " ")
-    pattern = re.compile(r'\b([A-Z][a-zA-Z]{1,}(?:\s+[A-Z][a-zA-Z]{1,}){0,4})\b')
-    matches = pattern.findall(text)
-
-    blacklist = {"Day", "Days", "Tip", "Tips", "Include", "Duration", "Budget", "Cost", "Morning", "Evening", "Food", "Daywise"}
-    seen = set()
-    candidates = []
-    for m in matches:
-        m = m.strip()
-        if len(m) < 2:
-            continue
-        if any(token.isdigit() for token in m.split()):
-            continue
-        if m in blacklist:
-            continue
-        key = m.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        candidates.append(m)
-        if len(candidates) >= max_candidates:
-            break
-    return candidates
-
-
-def geocode_place(place):
-    """Geocode a place name -> (lat, lon, display_name) or None"""
-    try:
-        url = "https://nominatim.openstreetmap.org/search"
-        params = {"q": place, "format": "json", "limit": 1}
-        headers = {"User-Agent": "novatripai/1.0 (+https://example.com)"}
-        r = requests.get(url, params=params, headers=headers, timeout=8)
-        r.raise_for_status()
-        data = r.json()
-        if not data:
-            return None
-        item = data[0]
-        return float(item["lat"]), float(item["lon"]), item.get("display_name", place)
-    except Exception:
-        return None
-
-
-@app.route("/pinpoints", methods=["POST"])
-def pinpoints():
-    """
-    Accepts JSON:
-      - { "text": "<itinerary text>", "limit": <int> }
-      OR
-      - { "places": ["Place 1", "Place 2"], "limit": <int> }
-    Returns GeoJSON FeatureCollection of geocoded points.
-    """
+@app.route("/download_itinerary", methods=["POST"])
+def download_itinerary():
     payload = request.get_json(silent=True) or {}
-    limit = int(payload.get("limit", 12) or 12)
+    posted = payload.get("itinerary_text") or ""
+    filename = payload.get("filename") or "itinerary"
+    source = posted or session.get("last_raw_itinerary") or ""
+    if posted and looks_truncated(posted):
+        raw = session.get("last_raw_itinerary")
+        if raw and len(raw) > len(posted):
+            source = raw
+    if not source:
+        return jsonify({"error": "No itinerary available for download"}), 400
+    filename = re.sub(r'[^A-Za-z0-9_\-\. ]+', '_', filename).strip()
+    if not filename:
+        filename = "itinerary"
+    final_text = str(source)
+    if REPORTLAB_AVAILABLE:
+        try:
+            pdf_buf = pdf_from_text_reportlab(final_text, title=filename)
+            return send_file(pdf_buf, as_attachment=True, download_name=f"{filename}.pdf", mimetype="application/pdf")
+        except Exception:
+            current_app.logger.exception("ReportLab PDF generation failed; falling back to TXT.")
+    txt_bytes = BytesIO()
+    txt_bytes.write(final_text.encode("utf-8"))
+    txt_bytes.seek(0)
+    return send_file(txt_bytes, as_attachment=True, download_name=f"{filename}.txt", mimetype="text/plain; charset=utf-8")
 
-    # if places array provided, geocode those directly
-    places = payload.get("places")
-    candidates = []
-    if places and isinstance(places, list):
-        candidates = [p for p in places if isinstance(p, str) and p.strip()]
-    else:
-        text = payload.get("text", "") or ""
-        if not text.strip():
-            return jsonify({"error": "No itinerary text or places provided"}), 400
-        candidates = extract_place_candidates(text, max_candidates=limit*2)
-
-    features = []
-    count = 0
-    for cand in candidates:
-        if count >= limit:
-            break
-        g = geocode_place(cand)
-        if not g:
-            current_app.logger.debug(f"Geocode failed for: {cand}")
-            continue
-        lat, lon, display = g
-        feat = {
-            "type": "Feature",
-            "properties": {"name": cand, "display_name": display},
-            "geometry": {"type": "Point", "coordinates": [lon, lat]}
-        }
-        features.append(feat)
-        count += 1
-
-    result = {"type": "FeatureCollection", "features": features, "meta": {"candidates_examined": len(candidates)}}
-    return jsonify(result)
-
-
-# -----------------------
-# Structured chat modify endpoint (STRICT JSON output)
-# -----------------------
+# Chat modify structured (keeps prior behaviour)
 def extract_json_from_text(text):
-    """
-    Try to extract the first JSON object/array from a raw text (model output).
-    """
     if not isinstance(text, str):
         return None
-    # naive attempt: find first '{' or '[' and attempt json.loads progressively
     idx = text.find('{')
     idx2 = text.find('[')
     if idx == -1 and idx2 == -1:
         return None
     start = idx if (idx != -1) else idx2
-    # try to find matching braces by scanning from the end backwards
     for end in range(len(text), start, -1):
         try:
             candidate = text[start:end]
@@ -286,53 +366,17 @@ def extract_json_from_text(text):
             continue
     return None
 
-
-# defensive sanitizer for itinerary text before inserting into prompt
-MAX_ITINERARY_CHARS = 6000
-
-
-def sanitize_itinerary_text(text: str, max_chars=MAX_ITINERARY_CHARS) -> str:
-    if not text:
-        return ""
-    # remove simple HTML tags
-    text = re.sub(r"<[^>]+>", " ", text)
-    # replace problematic sequences
-    text = text.replace("```", "` ` `").replace("<<ITINERARY_START>>", " ").replace("<<ITINERARY_END>>", " ")
-    # strip control chars except newline/tab
-    text = re.sub(r"[^\x09\x0A\x0D\x20-\x7E\u00A0-\uFFFF]", " ", text)
-    # collapse multiple spaces/newlines
-    text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r"\n\s*\n+", "\n\n", text)
-    # truncate head+tail if too long
-    if len(text) > max_chars:
-        half = max_chars // 2
-        head = text[:half]
-        tail = text[-half:]
-        text = head + "\n\n[...truncated...]\n\n" + tail
-    return text
-
-
 @app.route("/chat_modify_structured", methods=["POST"])
 def chat_modify_structured():
-    """
-    Strict server implementation: always returns JSON:
-      { "itinerary_text": "<full itinerary text (ALL DAYS)>", "places": [ ... ] }
-
-    Accepts JSON: { "instruction": "<user text>", "current_itinerary": "<full itinerary text>" }
-    """
     payload = request.get_json(silent=True) or {}
     instr = (payload.get("instruction") or "").strip()
-    current = (payload.get("current_itinerary") or "").strip()
-
+    current_it = (payload.get("current_itinerary") or "").strip()
     if not instr:
         return jsonify({"error": "No instruction provided"}), 400
-    if not current:
+    if not current_it:
         return jsonify({"error": "No current itinerary provided"}), 400
-
-    # sanitize but keep as much as possible so model has full context
-    sanitized_current = sanitize_itinerary_text(current)
-
-    # Strong explicit prompt: MUST return the full updated itinerary (all days).
+    sanitized_current = sanitize_itinerary_text(current_it)
+    sanitized_current = strip_asterisks(sanitized_current)
     prompt = (
         "You are a travel itinerary assistant. You are given the user's current itinerary "
         "and a user instruction describing edits. **You MUST return only a single valid JSON object** "
@@ -353,13 +397,10 @@ def chat_modify_structured():
         + "\n\n"
         "Return only valid JSON with keys 'itinerary' and 'places'. Ensure JSON is parseable."
     )
-
     raw = generate_itinerary_via_groq(prompt)
-
     parsed = None
     itinerary_text = None
     places = []
-
     try:
         if isinstance(raw, str):
             parsed = json.loads(raw)
@@ -367,10 +408,8 @@ def chat_modify_structured():
             parsed = None
     except Exception:
         parsed = None
-
     if parsed is None:
         parsed = extract_json_from_text(raw)
-
     if isinstance(parsed, dict):
         itinerary_text = parsed.get("itinerary") or parsed.get("itinerary_text") or ""
         places_candidate = parsed.get("places") or []
@@ -379,7 +418,6 @@ def chat_modify_structured():
         else:
             places = []
     else:
-        # Attempt one more unquote step if raw contains quoted JSON
         if isinstance(raw, str):
             trimmed = raw.strip()
             if (trimmed.startswith('"') and trimmed.endswith('"')) or (trimmed.startswith("'") and trimmed.endswith("'")):
@@ -392,29 +430,23 @@ def chat_modify_structured():
                             places = [str(p).strip() for p in places_candidate if str(p).strip()]
                 except Exception:
                     pass
-
-    # Final fallback: use raw as itinerary_text but still return strict JSON
     if not itinerary_text:
         if isinstance(raw, (dict, list)):
             itinerary_text = json.dumps(raw, indent=2)
         else:
             itinerary_text = str(raw)
         places = []
-
     itinerary_text = str(itinerary_text)
+    itinerary_text = strip_asterisks(itinerary_text)
+    itinerary_text = align_itinerary_text(itinerary_text)
     places = [str(p) for p in (places or [])]
-
     try:
         hist = session.get("itinerary_history", [])
         hist.append({"instruction": instr, "result": itinerary_text})
         session["itinerary_history"] = hist[-10:]
     except Exception:
         current_app.logger.debug("Could not save itinerary history in session.")
-
     return jsonify({"itinerary_text": itinerary_text, "places": places})
 
-
-
 if __name__ == "__main__":
-    # Dev server only: bind to localhost
     app.run(host="127.0.0.1", port=5000, debug=True)
