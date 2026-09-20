@@ -260,6 +260,10 @@
           </div>
         </form>
 
+        {% if error %}
+          <div class="spaced" role="alert" style="color:#b91c1c; background:#fee2e2; border:1px solid #fecaca; border-radius:8px; padding:10px 12px;">{{ error }}</div>
+        {% endif %}
+
         <!-- itinerary -->
         {% if result %}
           <div class="spaced">
@@ -382,13 +386,13 @@
     async function showRoute(){
       const originRaw = document.getElementById('originInput').value.trim();
       const destRaw = document.getElementById('destInput').value.trim();
-      if(!destRawreturn alert('Please enter a destination.');
+      if(!destRaw) return alert('Please enter a destination.');
       if(!originRaw){
-        if(confirm('No origin provided. Use browser location?'){ document.getElementById('useMyLocBtn').click(); return; } else return;
+        if(confirm('No origin provided. Use browser location?')){ document.getElementById('useMyLocBtn').click(); return; } else return;
       }
       const params = new URLSearchParams();
       if(isLatLng(originRaw)) params.set('origin', originRaw); else params.set('origin_address', originRaw);
-      if(isLatLng(destRaw)params.set('dest', destRaw); else params.set('dest_address', destRaw);
+      if(isLatLng(destRaw)) params.set('dest', destRaw); else params.set('dest_address', destRaw);
 
       routeInfo.textContent = 'Loading route...';
       try {
@@ -398,7 +402,7 @@
           throw new Error(p.error || res.statusText);
         }
         const feature = await res.json();
-        if(routeLayermap.removeLayer(routeLayer);
+        if(routeLayer) map.removeLayer(routeLayer);
         routeLayer = L.geoJSON(feature, { style:{ weight:5, opacity:0.92, color: '#1e40af' } }).addTo(map);
         map.fitBounds(routeLayer.getBounds(), { padding:[24,24] });
         const km = (feature.properties.distance/1000).toFixed(2);
@@ -437,7 +441,7 @@
       const text = pre.innerText.trim();
       if(!text) return alert('Itinerary empty.');
 
-      const filenameBase = (document.getElementById('destination')?.value || 'itinerary').replace(/[^A-Za-z0-9_\- ]+/g, '_').trim(|| 'itinerary';
+      const filenameBase = (document.getElementById('destination')?.value || 'itinerary').replace(/[^A-Za-z0-9_\- ]+/g, '_').trim() || 'itinerary';
 
       try {
         const res = await fetch('/download_itinerary', {
@@ -450,7 +454,7 @@
           throw new Error(p.error || res.statusText || 'Download failed');
         }
         const blob = await res.blob();
-        const contentType = res.headers.get('Content-Type'|| '';
+        const contentType = res.headers.get('Content-Type') || '';
         const ext = contentType.includes('pdf') ? 'pdf' : 'txt';
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
@@ -467,7 +471,7 @@
       if(!input || !pre) return alert('Chat or itinerary missing.');
       const instr = input.value.trim();
       const current = pre.innerText.trim();
-      if(!instrreturn alert('Write an instruction.');
+      if(!instr) return alert('Write an instruction.');
 
       status.textContent = 'Applying changes...';
       document.getElementById('sendChatBtn').disabled = true;
@@ -502,7 +506,7 @@
       e.preventDefault();
       window._itinerary_undo = window._itinerary_undo || [];
       const prev = window._itinerary_undo.pop();
-      if(!prevreturn alert('Nothing to undo.');
+      if(!prev) return alert('Nothing to undo.');
       document.getElementById('itineraryText').innerText = prev;
     });
 
