@@ -147,7 +147,7 @@ def generate_itinerary_via_groq(prompt_text: str) -> str:
 
     try:
         response = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model="openai/gpt-oss-20b",
             messages=[
                 {"role": "system", "content": "You are a travel assistant."},
                 {"role": "user", "content": prompt_text}
@@ -160,7 +160,7 @@ def generate_itinerary_via_groq(prompt_text: str) -> str:
             try:
                 followup_prompt = "The previous itinerary got cut off. Finish the final sentence or paragraph so the itinerary ends cleanly."
                 follow = client.chat.completions.create(
-                    model="llama-3.1-8b-instant",
+                    model="openai/gpt-oss-20b",
                     messages=[
                         {"role":"system","content":"You are a travel assistant."},
                         {"role":"user","content": followup_prompt},
