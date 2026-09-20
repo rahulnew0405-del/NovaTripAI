@@ -3,3 +3,7 @@ __pycache__/
 *.pyc
 .env
 *.sqlite3
+.vercel
+.env.local
+.env.check
+itinerary_debug.txt
