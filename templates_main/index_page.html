@@ -48,7 +48,7 @@
     html,body{
       height:100%;
       margin:0;
-      background: linear-gradient(180deg, var(--bg) 0%, rgba(255,255,255,0.02) 100%);
+      background: linear-gradient(180deg, var(--bg0%, rgba(255,255,255,0.02) 100%);
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
       color: var(--text);
       -webkit-font-smoothing:antialiased;
@@ -101,7 +101,7 @@
       align-items:center;
     }
 
-    /* form controls (rounded) */
+    /* form controls (rounded*/
     label{ display:block; font-size:13px; color:var(--muted); margin-bottom:6px; }
     input[type="text"], input[type="number"], textarea {
       width:100%;
@@ -382,13 +382,13 @@
     async function showRoute(){
       const originRaw = document.getElementById('originInput').value.trim();
       const destRaw = document.getElementById('destInput').value.trim();
-      if(!destRaw) return alert('Please enter a destination.');
+      if(!destRawreturn alert('Please enter a destination.');
       if(!originRaw){
-        if(confirm('No origin provided. Use browser location?')) { document.getElementById('useMyLocBtn').click(); return; } else return;
+        if(confirm('No origin provided. Use browser location?'){ document.getElementById('useMyLocBtn').click(); return; } else return;
       }
       const params = new URLSearchParams();
       if(isLatLng(originRaw)) params.set('origin', originRaw); else params.set('origin_address', originRaw);
-      if(isLatLng(destRaw)) params.set('dest', destRaw); else params.set('dest_address', destRaw);
+      if(isLatLng(destRaw)params.set('dest', destRaw); else params.set('dest_address', destRaw);
 
       routeInfo.textContent = 'Loading route...';
       try {
@@ -398,7 +398,7 @@
           throw new Error(p.error || res.statusText);
         }
         const feature = await res.json();
-        if(routeLayer) map.removeLayer(routeLayer);
+        if(routeLayermap.removeLayer(routeLayer);
         routeLayer = L.geoJSON(feature, { style:{ weight:5, opacity:0.92, color: '#1e40af' } }).addTo(map);
         map.fitBounds(routeLayer.getBounds(), { padding:[24,24] });
         const km = (feature.properties.distance/1000).toFixed(2);
@@ -437,7 +437,7 @@
       const text = pre.innerText.trim();
       if(!text) return alert('Itinerary empty.');
 
-      const filenameBase = (document.getElementById('destination')?.value || 'itinerary').replace(/[^A-Za-z0-9_\- ]+/g, '_').trim() || 'itinerary';
+      const filenameBase = (document.getElementById('destination')?.value || 'itinerary').replace(/[^A-Za-z0-9_\- ]+/g, '_').trim(|| 'itinerary';
 
       try {
         const res = await fetch('/download_itinerary', {
@@ -450,7 +450,7 @@
           throw new Error(p.error || res.statusText || 'Download failed');
         }
         const blob = await res.blob();
-        const contentType = res.headers.get('Content-Type') || '';
+        const contentType = res.headers.get('Content-Type'|| '';
         const ext = contentType.includes('pdf') ? 'pdf' : 'txt';
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
@@ -467,7 +467,7 @@
       if(!input || !pre) return alert('Chat or itinerary missing.');
       const instr = input.value.trim();
       const current = pre.innerText.trim();
-      if(!instr) return alert('Write an instruction.');
+      if(!instrreturn alert('Write an instruction.');
 
       status.textContent = 'Applying changes...';
       document.getElementById('sendChatBtn').disabled = true;
@@ -502,7 +502,7 @@
       e.preventDefault();
       window._itinerary_undo = window._itinerary_undo || [];
       const prev = window._itinerary_undo.pop();
-      if(!prev) return alert('Nothing to undo.');
+      if(!prevreturn alert('Nothing to undo.');
       document.getElementById('itineraryText').innerText = prev;
     });
 

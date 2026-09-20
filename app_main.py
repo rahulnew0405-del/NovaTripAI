@@ -2,6 +2,7 @@
 # Full Flask app — sanitize, remove markdown asterisks, align itinerary bullets for neat display,
 # keep raw output in session, auto-finish truncated LLM responses, PDF download fallback.
 import os
+import sys
 import re
 import json
 import math
@@ -11,6 +12,8 @@ from flask import (
     Flask, render_template, request, jsonify, session,
     current_app, send_file
 )
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 
 # Optional Groq SDK
 try:
@@ -28,7 +31,21 @@ except Exception:
     REPORTLAB_AVAILABLE = False
 
 app = Flask(__name__, template_folder="templates_main")
-app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-secret-key")
+_secret_key = os.environ.get("FLASK_SECRET_KEY")
+if not _secret_key:
+    sys.exit(
+        "FLASK_SECRET_KEY environment variable is not set. Generate a strong random "
+        "value and set it before starting the app, e.g.: "
+        "python -c \"import secrets; print(secrets.token_hex(32))\""
+    )
+app.secret_key = _secret_key
+
+# Per-IP rate limiting for routes that call external services (Groq, Nominatim, OSRM).
+# In-memory storage: counters are per-process, so with N worker processes the effective
+# limit is up to N x the configured rate. Behind a reverse proxy, wrap the app with
+# werkzeug's ProxyFix so get_remote_address sees the real client IP, not the proxy's.
+limiter = Limiter(get_remote_address, app=app, storage_uri="memory://")
+EXTERNAL_CALL_LIMIT = "10 per minute"
 
 # Groq client (if available + key present)
 GROQ_KEY = os.environ.get("GROQ_API_KEY")
@@ -215,6 +232,7 @@ def pdf_from_text_reportlab(text: str, title: str = "Itinerary") -> BytesIO:
 # Routes
 # -----------------------
 @app.route("/", methods=["GET", "POST"])
+@limiter.limit(EXTERNAL_CALL_LIMIT)
 def home():
     result = None
     destination = ""
@@ -266,6 +284,7 @@ def geocode_place_simple(place):
         return None
 
 @app.route("/route")
+@limiter.limit(EXTERNAL_CALL_LIMIT)
 def get_route():
     origin = request.args.get("origin")
     dest = request.args.get("dest")
@@ -350,6 +369,12 @@ def download_itinerary():
     return send_file(txt_bytes, as_attachment=True, download_name=f"{filename}.txt", mimetype="text/plain; charset=utf-8")
 
 # Chat modify structured (keeps prior behaviour)
+# Max characters after the JSON start marker that extract_json_from_text will try to parse.
+# The search below retries json.loads() on every shorter prefix (O(n) attempts, each
+# O(n) to slice and scan), so an uncapped malformed LLM response would burn CPU
+# quadratically and tie up a worker with no way to abort. Capping the window bounds it.
+MAX_JSON_SCAN_CHARS = 20000
+
 def extract_json_from_text(text):
     if not isinstance(text, str):
         return None
@@ -358,7 +383,9 @@ def extract_json_from_text(text):
     if idx == -1 and idx2 == -1:
         return None
     start = idx if (idx != -1) else idx2
-    for end in range(len(text), start, -1):
+    # Only scan within the capped window after the start marker (see MAX_JSON_SCAN_CHARS).
+    max_end = min(len(text), start + MAX_JSON_SCAN_CHARS)
+    for end in range(max_end, start, -1):
         try:
             candidate = text[start:end]
             return json.loads(candidate)
@@ -367,6 +394,7 @@ def extract_json_from_text(text):
     return None
 
 @app.route("/chat_modify_structured", methods=["POST"])
+@limiter.limit(EXTERNAL_CALL_LIMIT)
 def chat_modify_structured():
     payload = request.get_json(silent=True) or {}
     instr = (payload.get("instruction") or "").strip()
@@ -449,4 +477,5 @@ def chat_modify_structured():
     return jsonify({"itinerary_text": itinerary_text, "places": places})
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5000, debug=True)
+    debug = os.environ.get("FLASK_DEBUG", "").strip().lower() in ("1", "true", "yes", "on")
+    app.run(host="127.0.0.1", port=5000, debug=debug)
